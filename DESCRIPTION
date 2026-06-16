@@ -4,6 +4,10 @@ Type: Project
 Version: 0.0.1
 Encoding: UTF-8
 Imports: 
-    usethis
+    dplyr,
+    readr,
+    tibble
 URL: https://github.com/kristinekdl/AAVTuD_2wDIO_mRNA
 BugReports: https://github.com/kristinekdl/AAVTuD_2wDIO_mRNA/issues
+Suggests: 
+    usethis
