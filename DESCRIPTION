@@ -1,0 +1,7 @@
+Package: AAVTuD_2wDIO_mRNA
+Title: Analysis Project for AAVTuD_2wDIO_mRNA
+Type: Project
+Version: 0.0.1
+Encoding: UTF-8
+Imports: 
+    usethis

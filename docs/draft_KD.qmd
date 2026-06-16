@@ -1,0 +1,412 @@
+---
+title: "draft_KD"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+library(here)
+library(readr)
+library(dplyr)
+library(tibble)
+library(ggrepel)
+library(tidyverse)
+library(limma)
+library(DESeq2)
+library(pheatmap)
+library(ggforce)
+library(ggplot2)
+library(ggrepel)
+library(RColorBrewer)
+library(enrichplot)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(stringr)
+library(ComplexHeatmap)
+library(circlize)
+
+here()
+
+source("~/Documents/RProjects/2026_AAV-TuD_2wDIOCohort/R/functions.R")
+```
+
+```{r Import data}
+meta <- import_meta_data("meta/metadata.csv")
+
+raw_counts_matrix <- import_raw_counts_matrix("data-raw/salmon.merged.gene_counts.tsv", meta)
+
+
+# Make a gene list using annotations from raw_counts_matrix
+genes_annot <- raw_counts_matrix |>
+  rownames_to_column(var = "gene_id") |>
+  dplyr::select("gene_id", "gene_name")
+
+
+# Get mouse annotations
+# Load libraries
+library(AnnotationHub)
+library(ensembldb)
+
+# # Connect to AnnotationHub
+# ah <- AnnotationHub()
+# ah
+# 
+# # Query AnnotationHub
+# mouse_ens <- query(ah, c("Mus musculus", "EnsDb", "GRCm39"))
+# mouse_ens
+# 
+# # Extract annotations of interest (as of Apr 2026: GRCm39, release 113)
+# # If you want GRCm38, use release 102.
+# mouse_ens <- mouse_ens[["AH116909"]] # Ensembl release 112 for Mus Musculus; release 113 not available yet.
+# 
+# # Extract gene-level information
+# genes(mouse_ens, return.type = "data.frame")
+# 
+# # Extract transcript-level information
+# transcripts(mouse_ens, return.type = "data.frame")
+# 
+# # Extract exon-level information
+# exons(mouse_ens, return.type = "data.frame")
+# 
+# # Create a gene-level dataframe based on the genes from the raw_counts matrix
+# annotations_ahb <- genes(mouse_ens, return.type = "data.frame") |>
+#   dplyr::select(gene_id, gene_name, entrezid, gene_biotype, description) |>
+#   dplyr::filter(gene_id %in% genes_annot$gene_id)
+# 
+# saveRDS(annotations_ahb,"data/annotations.rds")
+
+# Load annotations.rds file
+annotations_ahb <- readRDS("data/annotations.rds")
+```
+
+```{r Data filtering}
+iWAT_meta <- meta |>
+  dplyr::filter(tissue == "iWAT")
+
+iWAT_meta <- iWAT_meta |>
+  dplyr::mutate(relative_miRNA = 2^(-miRNA_level))
+
+# Scale miRNA levels - turns values to "low, normal, or high relative to the group average"
+iWAT_meta <- iWAT_meta |>
+  dplyr::mutate(miRNA_scaled = scale(relative_miRNA))
+
+iWAT_samples <- meta |>
+  dplyr::filter(tissue == "iWAT") |>
+  dplyr::pull(sample_name)
+
+iWAT_raw_counts <- raw_counts_matrix |>
+  dplyr::select(gene_name, dplyr::all_of(iWAT_samples)) |>
+  dplyr::select(-"gene_name") |>
+  base::round()
+
+###################### DEseq normalized counts
+all(colnames(iWAT_raw_counts) %in% rownames(iWAT_meta))
+all(colnames(iWAT_raw_counts) == rownames(iWAT_meta))
+
+
+## Create DESeq2Dataset object
+dds <- DESeqDataSetFromMatrix(
+  countData = iWAT_raw_counts,
+  colData = iWAT_meta,
+  design = ~miRNA_scaled + group
+)
+```
+
+```{r Data cleanup}
+### Choose only samples with confirmed KD in TM assay
+iWAT_meta <- iWAT_meta |>
+  dplyr::filter_out(mouse_ID %in% c(
+    "JWK-0408", # probably sample mixup
+    "JWK-0404",
+    "JWK-0376",
+    "JWK-0372", # strong outlier
+    "JWK-0403",
+    "JWK-0373",
+    "JWK-0377"
+  ))
+
+# 6x7
+iWAT_meta <- iWAT_meta |>
+  dplyr::filter(mouse_ID %in% c(
+    "JWK-0395",
+    "JWK-0396",
+    "JWK-0397",
+    "JWK-0407",
+    "JWK-0371",
+    # "JWK-0372", #strong outlier
+    "JWK-0373",
+    "JWK-0400",
+    "JWK-0401",
+    "JWK-0402",
+    "JWK-0376",
+    "JWK-0377",
+    "JWK-0378",
+    "JWK-0380"
+  ))
+
+# 4x4
+iWAT_meta <- iWAT_meta |>
+  dplyr::filter(mouse_ID %in% c(
+    "JWK-0395",
+    "JWK-0396",
+    "JWK-0397",
+    "JWK-0407",
+    "JWK-0400",
+    "JWK-0401",
+    "JWK-0402",
+    "JWK-0378"
+  ))
+
+iWAT_samples <- iWAT_meta |>
+  dplyr::filter(tissue == "iWAT") |>
+  dplyr::pull(sample_name)
+
+iWAT_raw_counts <- raw_counts_matrix |>
+  dplyr::select(gene_name, dplyr::all_of(iWAT_samples)) |>
+  dplyr::select(-"gene_name") |>
+  base::round()
+
+###################### DEseq normalized counts
+all(colnames(iWAT_raw_counts) %in% rownames(iWAT_meta))
+all(colnames(iWAT_raw_counts) == rownames(iWAT_meta))
+
+
+## Create DESeq2Dataset object
+dds <- DESeqDataSetFromMatrix(
+  countData = iWAT_raw_counts,
+  colData = iWAT_meta,
+  #design = ~ miRNA_scaled + group
+  design = ~ group
+)
+```
+
+```{r PCA}
+######################## PCA plots
+# Transform counts for data visualization
+rld <- rlog(dds, blind = FALSE)
+
+# Basic PCA plot
+plotPCA(rld, intgroup = "group")
+plotPCA(rld, intgroup = "miRNA_scaled")
+plotPCA(rld, intgroup = c("group", "BW"))
+
+# Extract PCA data
+pca_data <- plotPCA(rld, intgroup = "group", returnData = TRUE)
+
+# Add sample names as a column
+pca_data$sample_name <- rownames(pca_data)
+
+# Calculate variance explained
+percentVar <- round(100 * attr(pca_data, "percentVar"))
+
+# Plot PCA with ellipses
+ggplot(pca_data, aes(x = PC1, y = PC2, color = group, label = sample_name)) +
+  geom_point(size = 2) + # Add points
+  scale_color_manual(values = c("#54494B", "#E5C689")) +
+  stat_ellipse(aes(group = group), type = "t", level = 0.95) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  theme_minimal() +
+  theme(legend.position = "top") +
+  geom_label_repel(max.overlaps = 20)
+
+
+## Plot PCA for other PC's (PC3 and PC4)
+# Input a matrix of log-transformed values
+# rld <- rlog(dds, blind=TRUE)
+rld_mat <- assay(rld)
+pca <- prcomp(t(rld_mat))
+
+percentVar <- (pca$sdev^2) / sum(pca$sdev^2)
+
+# Create data frame with metadata and PC3 and PC4 values for input to ggplot
+df <- cbind(iWAT_meta, pca$x)
+
+ggplot(df, aes(x = PC5, y = PC6, color = group, label = rownames(df))) +
+  geom_point(size = 2) +
+  stat_ellipse(type = "norm", level = 0.95) +
+  geom_label_repel(max.overlaps = 20) +
+  scale_color_manual(values = c("#54494B", "#E5C689")) +
+  xlab(paste0("PC5: ", round(100 * percentVar[5], 1), "% variance")) +
+  ylab(paste0("PC6: ", round(100 * percentVar[6], 1), "% variance")) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+ggplot(df, aes(x = PC3, y = PC4, color = group, label = rownames(df))) +
+  geom_point(size = 2) +
+  stat_ellipse(type = "norm", level = 0.95) +
+  geom_label_repel(max.overlaps = 20) +
+  scale_color_manual(values = c("#54494B", "#E5C689")) +
+  xlab(paste0("PC3: ", round(100 * percentVar[3], 1), "% variance")) +
+  ylab(paste0("PC4: ", round(100 * percentVar[4], 1), "% variance")) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+ggplot(df, aes(x = PC7, y = PC8, color = group)) +
+  geom_point(size = 2) +
+  stat_ellipse(type = "t", level = 0.95) +
+  scale_color_manual(values = c("#54494B", "#E5C689")) +
+  xlab(paste0("PC7: ", round(100 * percentVar[7], 1), "% variance")) +
+  ylab(paste0("PC8: ", round(100 * percentVar[8], 1), "% variance")) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+ggplot(df, aes(x = PC9, y = PC10, color = group)) +
+  geom_point(size = 2) +
+  stat_ellipse(type = "t", level = 0.95) +
+  scale_color_manual(values = c("#54494B", "#E5C689")) +
+  xlab(paste0("PC9: ", round(100 * percentVar[9], 1), "% variance")) +
+  ylab(paste0("PC10: ", round(100 * percentVar[10], 1), "% variance")) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+### Check other confounders
+
+#-------------------------------------------
+# Bodyweight
+#-------------------------------------------
+
+pca_data <- plotPCA(
+  rld,
+  intgroup = "group",
+  returnData = TRUE
+)
+
+# Add metadata correctly aligned by sample names
+
+pca_data$BW <- colData(rld)[rownames(pca_data), "BW"]
+
+# Add sample names
+
+pca_data$sample_name <- rownames(pca_data)
+
+percentVar <- round(100 * attr(pca_data, "percentVar"))
+
+ggplot(
+  pca_data,
+  aes(
+    x = PC1, y = PC2,
+    shape = group,
+    color = BW
+  )
+) +
+  geom_point(size = 4) +
+  scale_shape_manual(values = c(
+    "ctrl-TuD_6w" = 16,
+    "miR-335-TuD_6w" = 17
+  )) +
+  scale_color_viridis_c(name = "BW") +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  stat_ellipse(type = "t", level = 0.95) +
+  theme_minimal()
+```
+
+```{r Heatmap to check replicate correlation}
+norm_counts <- counts(dds, normalized = TRUE)
+vsd <- vst(dds, blind = TRUE)
+
+mat <- assay(vsd)
+sample_cor <- cor(mat)
+
+pheatmap(sample_cor,
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  main = "Sample-to-sample correlation"
+)
+```
+
+```{r}
+###################### DESeq
+## Outputs a results table with all DE genes
+
+# Perform the DE analysis
+dds <- DESeq(dds)
+
+resultsNames(dds)
+# Make sure that the control is at the beginning of the levels
+dds$miRNA_scaled
+# dds$condition <- relevel(dds$condition, ref = "untreated")
+
+# Extract results table
+res_table <- results(dds, name = "miRNA_scaled", alpha = 0.05)
+
+# Filter genes by zero expression
+res_table |>
+  data.frame() |>
+  dplyr::filter(baseMean == 0)
+
+# Filter genes that have an extreme outlier
+res_table |>
+  as.data.frame() |>
+  dplyr::filter(
+    is.na(pvalue),
+    is.na(padj),
+    baseMean > 0
+  )
+
+# Filter genes below the low mean threshold
+res_table |>
+  data.frame() |>
+  dplyr::filter(
+    !is.na(pvalue),
+    is.na(padj),
+    baseMean > 0
+  )
+
+# LFC shrinking
+# Save the unshrunken results to compare
+res_table_unshrunken <- res_table
+
+# Apply fold change shrinkage
+res_table <- lfcShrink(dds, coef = "miRNA_scaled", type = "apeglm")
+# In the unshrunken fold change values plotted, you can see the abundance of scatter for the the lowly expressed genes.
+# That is, many of the low expressors exhibit very high fold changes.
+# After shrinkage, we see the fold changes are much smaller estimates.
+
+# Check how many DEGs were retreived
+summary(res_table, alpha = 0.05) # padj/FDR < 0.05
+
+# Compare with unshrunken
+summary(res_table_unshrunken, alpha = 0.05)
+
+# MA plot
+plotMA(res_table, ylim = c(-2, 2))
+plotMA(res_table_unshrunken, ylim = c(-2, 2))
+
+padj.cutoff <- 0.05
+
+# Create a tibble of results and add back gene ids
+res_table_tb <- res_table |>
+  data.frame() |>
+  rownames_to_column(var = "gene_id") |>
+  as_tibble()
+
+# Add gene_name from  original counts matrix
+res_table_tb <- res_table_tb |>
+  left_join(
+    raw_counts_matrix |>
+      rownames_to_column(var = "gene_id") |>
+      dplyr::select(gene_id, gene_name),
+    by = "gene_id"
+  )
+
+# Subset the tibble to keep only significant genes (padj<0.05)
+sig_kd <- res_table_tb |>
+  dplyr::filter(padj < padj.cutoff)
+
+# Take a quick look at this tibble
+sig_kd
+
+# Make a csv file
+# write_csv(sig_kd, "results/sig_kd.csv")
+```
+
+```{r}
+design <- model.matrix(~miRNA_level, data = iWAT_meta)
+v <- voom(iWAT_raw_counts, design)
+fit <- lmFit(v, design)
+fit <- eBayes(fit)
+topTable(fit, coef = "miRNA_level")
+```

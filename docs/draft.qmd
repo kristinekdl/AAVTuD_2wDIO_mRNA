@@ -1,0 +1,1363 @@
+---
+title: "draft"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+# Load libraries from description file
+pak::pak()
+
+# library(here)
+# library(readr)
+# library(dplyr)
+# library(tibble)
+# library(ggrepel)
+# library(tidyverse)
+# library(limma)
+# library(DESeq2)
+# library(pheatmap)
+# library(ggforce)
+# library(ggplot2)
+# library(ggrepel)
+# library(RColorBrewer)
+# library(enrichplot)
+# library(clusterProfiler)
+# library(org.Mm.eg.db)
+# library(stringr)
+# library(ComplexHeatmap)
+# library(circlize)
+# 
+# here()
+
+source("~/Documents/RProjects/2026_AAV-TuD_2wDIOCohort/R/functions.R")
+```
+
+```{r Import data}
+meta <- import_meta_data("meta/metadata.csv")
+
+raw_counts_matrix <- import_raw_counts_matrix("data-raw/salmon.merged.gene_counts.tsv", meta)
+
+
+# Make a gene list using annotations from raw_counts_matrix
+genes_annot <- raw_counts_matrix |>
+  rownames_to_column(var = "gene_id") |>
+  dplyr::select("gene_id", "gene_name")
+
+
+# Get mouse annotations
+# Load libraries
+library(AnnotationHub)
+library(ensembldb)
+
+# Connect to AnnotationHub
+ah <- AnnotationHub()
+ah
+
+# Query AnnotationHub
+mouse_ens <- query(ah, c("Mus musculus", "EnsDb", "GRCm39"))
+mouse_ens
+
+# Extract annotations of interest (as of Apr 2026: GRCm39, release 113)
+# If you want GRCm38, use release 102.
+mouse_ens <- mouse_ens[["AH116909"]] # Ensembl release 112 for Mus Musculus; release 113 not available yet.
+
+# Extract gene-level information
+genes(mouse_ens, return.type = "data.frame")
+
+# Extract transcript-level information
+transcripts(mouse_ens, return.type = "data.frame")
+
+# Extract exon-level information
+exons(mouse_ens, return.type = "data.frame")
+
+# Create a gene-level dataframe based on the genes from the raw_counts matrix
+annotations_ahb <- genes(mouse_ens, return.type = "data.frame") |>
+  dplyr::select(gene_id, gene_name, entrezid, gene_biotype, description) |>
+  dplyr::filter(gene_id %in% genes_annot$gene_id)
+```
+
+```{r Data filtering}
+iWAT_meta <- meta |>
+  dplyr::filter(tissue == "iWAT")
+
+iWAT_meta$miRNA_scaled <- scale(iWAT_meta$miRNA_level)
+
+iWAT_samples <- meta |>
+  dplyr::filter(tissue == "iWAT") |>
+  dplyr::pull(sample_name)
+
+iWAT_raw_counts <- raw_counts_matrix |>
+  dplyr::select(gene_name, dplyr::all_of(iWAT_samples)) |>
+  dplyr::select(-"gene_name") |>
+  base::round()
+
+###################### DEseq normalized counts
+all(colnames(iWAT_raw_counts) %in% rownames(iWAT_meta))
+all(colnames(iWAT_raw_counts) == rownames(iWAT_meta))
+
+
+## Create DESeq2Dataset object
+dds <- DESeqDataSetFromMatrix(
+  countData = iWAT_raw_counts,
+  colData = iWAT_meta,
+  design = ~group
+)
+```
+
+
+```{r PCA}
+######################## PCA plots
+# Transform counts for data visualization
+rld <- rlog(dds, blind = TRUE)
+
+# Basic PCA plot
+plotPCA(rld, intgroup = "group")
+
+# Extract PCA data
+pca_data <- plotPCA(rld, intgroup = "group", returnData = TRUE)
+
+# Add sample names as a column
+pca_data$sample_name <- rownames(pca_data)
+
+# Calculate variance explained
+percentVar <- round(100 * attr(pca_data, "percentVar"))
+
+# Plot PCA with ellipses
+ggplot(pca_data, aes(x = PC1, y = PC2, color = group, label = sample_name)) +
+  geom_point(size = 2) + # Add points
+  scale_color_manual(values = c("#54494B", "#E5C689")) +
+  stat_ellipse(aes(group = group), type = "t", level = 0.95) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  theme_minimal() +
+  theme(legend.position = "top") +
+  geom_label_repel(max.overlaps = 20)
+
+
+## Plot PCA for other PC's (PC3 and PC4)
+# Input a matrix of log-transformed values
+# rld <- rlog(dds, blind=TRUE)
+rld_mat <- assay(rld)
+pca <- prcomp(t(rld_mat))
+
+percentVar <- (pca$sdev^2) / sum(pca$sdev^2)
+
+# Create data frame with metadata and PC3 and PC4 values for input to ggplot
+df <- cbind(iWAT_meta, pca$x)
+
+ggplot(df, aes(x = PC5, y = PC6, color = group, label = rownames(df))) +
+  geom_point(size = 2) +
+  stat_ellipse(type = "norm", level = 0.95) +
+  geom_label_repel(max.overlaps = 20) +
+  scale_color_manual(values = c("#54494B", "#E5C689")) +
+  xlab(paste0("PC5: ", round(100 * percentVar[5], 1), "% variance")) +
+  ylab(paste0("PC6: ", round(100 * percentVar[6], 1), "% variance")) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+ggplot(df, aes(x = PC3, y = PC4, color = group, label = rownames(df))) +
+  geom_point(size = 2) +
+  stat_ellipse(type = "norm", level = 0.95) +
+  geom_label_repel(max.overlaps = 20) +
+  scale_color_manual(values = c("#54494B", "#E5C689")) +
+  xlab(paste0("PC3: ", round(100 * percentVar[3], 1), "% variance")) +
+  ylab(paste0("PC4: ", round(100 * percentVar[4], 1), "% variance")) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+ggplot(df, aes(x = PC7, y = PC8, color = group)) +
+  geom_point(size = 2) +
+  stat_ellipse(type = "t", level = 0.95) +
+  scale_color_manual(values = c("#54494B", "#E5C689")) +
+  xlab(paste0("PC7: ", round(100 * percentVar[7], 1), "% variance")) +
+  ylab(paste0("PC8: ", round(100 * percentVar[8], 1), "% variance")) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+ggplot(df, aes(x = PC9, y = PC10, color = group)) +
+  geom_point(size = 2) +
+  stat_ellipse(type = "t", level = 0.95) +
+  scale_color_manual(values = c("#54494B", "#E5C689")) +
+  xlab(paste0("PC9: ", round(100 * percentVar[9], 1), "% variance")) +
+  ylab(paste0("PC10: ", round(100 * percentVar[10], 1), "% variance")) +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+```{r Heatmap to check replicate correlation}
+norm_counts <- counts(dds, normalized = TRUE)
+vsd <- vst(dds, blind = TRUE)
+
+mat <- assay(vsd)
+sample_cor <- cor(mat)
+
+pheatmap(sample_cor,
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  main = "Sample-to-sample correlation"
+)
+```
+
+
+```{r Data cleanup}
+### Choose only samples with confirmed KD in TM assay
+iWAT_meta <- meta |>
+  dplyr::filter_out(mouse_ID %in% c(
+    "JWK-0408",
+    "JWK-0404",
+    "JWK-0376",
+    "JWK-0372"
+  ))
+
+iWAT_samples <- iWAT_meta |>
+  dplyr::filter(tissue == "iWAT") |>
+  dplyr::pull(sample_name)
+
+iWAT_raw_counts <- raw_counts_matrix |>
+  dplyr::select(gene_name, dplyr::all_of(iWAT_samples)) |>
+  dplyr::select(-"gene_name") |>
+  base::round()
+
+
+iWAT_meta_clean <- iWAT_meta |>
+  dplyr::filter(mouse_ID %in% c(
+    "JWK-0395",
+    "JWK-0397",
+    "JWK-0407",
+    "JWK-0372",
+    "JWK-0400",
+    "JWK-0401",
+    "JWK-0402",
+    "JWK-0378"
+  ))
+
+iWAT_samples <- iWAT_meta_clean |>
+  dplyr::filter(tissue == "iWAT") |>
+  dplyr::pull(sample_name)
+
+iWAT_raw_counts <- raw_counts_matrix |>
+  dplyr::select(gene_name, dplyr::all_of(iWAT_samples)) |>
+  dplyr::select(-"gene_name") |>
+  base::round()
+
+
+###################### DEseq normalized counts
+all(colnames(iWAT_raw_counts) %in% rownames(iWAT_meta_clean))
+all(colnames(iWAT_raw_counts) == rownames(iWAT_meta_clean))
+
+## Create DESeq2Dataset object
+dds <- DESeqDataSetFromMatrix(
+  countData = iWAT_raw_counts,
+  colData = iWAT_meta_clean,
+  design = ~group
+)
+```
+
+
+```{r PCA - extended}
+########### KEGG pathway analysis on top 200 genes driving PC1 and PC2
+## Asks the question: are these genes enriched in pathways?
+
+## Extract top genes driving PC1 and PC2
+
+pc1_loadings <- pca$rotation[, "PC1"]
+
+top_pc1_genes <- sort(abs(pc1_loadings), decreasing = TRUE)[1:20]
+
+
+pc2_loadings <- pca$rotation[, "PC2"]
+
+top_pc2_genes <- sort(abs(pc2_loadings), decreasing = TRUE)[1:20]
+
+top_pc1 <- names(top_pc1_genes)
+top_pc2 <- names(top_pc2_genes)
+
+## Convert genes to a table
+pc1_table <- data.frame(
+  gene = names(pc1_loadings),
+  loading = pc1_loadings
+)
+pc1_table <- pc1_table[order(abs(pc1_table$loading), decreasing = TRUE), ]
+head(pc1_table, 20)
+
+pc2_table <- data.frame(
+  gene = names(pc2_loadings),
+  loading = pc2_loadings
+)
+pc2_table <- pc2_table[order(abs(pc2_table$loading), decreasing = TRUE), ]
+head(pc2_table, 20)
+
+## Annotate the table with annotations from annotations_ahb
+pc1_annot <- pc1_table |>
+  left_join(annotations_ahb, by = c("gene" = "gene_id"))
+head(pc1_annot, 20)
+head(pc1_annot[, c("gene_name", "loading")], 20)
+
+pc2_annot <- pc2_table |>
+  left_join(annotations_ahb, by = c("gene" = "gene_id"))
+head(pc2_annot, 20)
+
+# Check
+sum(is.na(pc1_annot$gene_name))
+sum(is.na(pc2_annot$gene_name))
+
+## Arrange genes and cutoff first 200
+
+top_pc1 <- pc1_annot |>
+  arrange(desc(abs(loading))) |>
+  slice(1:200)
+
+top_pc2 <- pc2_annot |>
+  arrange(desc(abs(loading))) |>
+  slice(1:200)
+
+## KEGG pathway analysis
+
+pc1_kegg_genes <- pc1_annot %>%
+  dplyr::filter(!is.na(entrezid))
+
+pc2_kegg_genes <- pc2_annot %>%
+  dplyr::filter(!is.na(entrezid))
+
+kegg_res_pc1 <- enrichKEGG(
+  gene         = top_pc1$entrezid,
+  organism     = "mmu",
+  pvalueCutoff = 0.05
+)
+
+kegg_res_pc2 <- enrichKEGG(
+  gene         = top_pc2$entrezid,
+  organism     = "mmu",
+  pvalueCutoff = 0.05
+)
+
+dotplot(kegg_res_pc1,
+  showCategory = 15,
+  title = "KEGG Pathways in PC1"
+)
+dotplot(kegg_res_pc2,
+  showCategory = 15,
+  title = "KEGG Pathways in PC2"
+)
+
+
+############ GSEA on ranked genes
+## Ranks all genes in the loadings and asks: are genes from a pathway concentrated at the top or bottom of a ranked list?
+## Ranks genes from high to low, then asks: do KEGG pathway genes cluster toward top or bottom?
+gene_ranks_pc1 <- pc1_annot$loading
+names(gene_ranks_pc1) <- pc1_annot$entrezid
+
+gene_ranks_pc1 <- gene_ranks_pc1[!is.na(names(gene_ranks_pc1))]
+gene_ranks_pc1 <- sort(gene_ranks_pc1, decreasing = TRUE)
+
+gse_kegg_pc1 <- gseKEGG(
+  geneList = gene_ranks_pc1,
+  organism = "mmu"
+)
+
+gseaplot2(gse_kegg_pc1, geneSetID = 1:5)
+dotplot(gse_kegg_pc1, showCategory = 15)
+
+
+gene_ranks_pc2 <- pc2_annot$loading
+names(gene_ranks_pc2) <- pc2_annot$entrezid
+
+gene_ranks_pc2 <- gene_ranks_pc2[!is.na(names(gene_ranks_pc2))]
+gene_ranks_pc2 <- sort(gene_ranks_pc2, decreasing = TRUE)
+
+gse_kegg_pc2 <- gseKEGG(
+  geneList = gene_ranks_pc1,
+  organism = "mmu"
+)
+
+gseaplot2(gse_kegg_pc2, geneSetID = 1:5)
+dotplot(gse_kegg_pc2, showCategory = 15)
+
+
+# Extract data and look at NES scores
+# If NES > 0, pathway is enriched at positive PC1 loadings. Means that genes in this pathway are higher on the right side of the PCA axis.
+# If NES <0, pathway is enriched at negative PC1 loadings. Means that genes in ths pathway are higher on the left side of the PCA axis.
+gsea_df_pc1 <- as.data.frame(gse_kegg_pc1)
+gsea_sig_pc1 <- gsea_df_pc1 |>
+  dplyr::filter(p.adjust < 0.05)
+top_pos_pc1 <- gsea_sig_pc1 |>
+  dplyr::arrange(desc(NES)) %>%
+  dplyr::slice(1:5)
+top_neg_pc1 <- gsea_sig_pc1 |>
+  dplyr::arrange(NES) %>%
+  dplyr::slice(1:5)
+gsea_top_pc1 <- dplyr::bind_rows(top_pos_pc1, top_neg_pc1)
+
+gsea_df_pc2 <- as.data.frame(gse_kegg_pc2)
+gsea_sig_pca2 <- gsea_df_pc2 |>
+  dplyr::filter(p.adjust < 0.05)
+
+top_pos_pc2 <- gsea_sig_pca2 |>
+  dplyr::arrange(desc(NES)) %>%
+  dplyr::slice(1:5)
+
+top_neg_pc2 <- gsea_sig_pca2 |>
+  dplyr::arrange(NES) %>%
+  dplyr::slice(1:5)
+
+gsea_top_pc2 <- dplyr::bind_rows(top_pos_pc2, top_neg_pc2)
+
+
+### Plot
+gsea_top_pc1 <- gsea_top_pc1 %>%
+  dplyr::mutate(
+    Description_clean = gsub(" - Mus musculus \\(house mouse\\)", "", Description),
+    Description_clean = str_wrap(Description_clean, width = 20)
+  )
+
+ggplot(gsea_top_pc1, aes(x = NES, y = reorder(Description_clean, NES))) +
+  geom_point(aes(size = setSize, color = p.adjust)) +
+  scale_color_gradient(low = "#B4C7D6", high = "#A94642") +
+  scale_x_continuous(limits = c(-2, 2)) +
+  scale_y_discrete(expand = expansion(mult = c(0.05, 0.1))) +
+  theme_minimal(base_size = 8) +
+  theme(
+    axis.title = element_text(color = "black"),
+    axis.text = element_text(color = "black"),
+    legend.title = element_text(color = "black"),
+    legend.text = element_text(color = "black")
+  ) +
+  labs(
+    title = "PC1 GSEA Pathway Enrichment",
+    x = "Normalized Enrichment Score (NES)",
+    y = NULL,
+    color = "adjusted p-value",
+    size = "Gene Set Size"
+  ) +
+  theme(
+    legend.title = element_text(size = 6),
+    legend.text = element_text(size = 5),
+    legend.key.size = unit(0.2, "cm"),
+    legend.position = "right"
+  ) # +
+# guides(
+#   size = guide_legend(override.aes = list(size = 2)),
+#   color = guide_colorbar(barwidth = 4, barheight = 0.3)
+# ) # for if you want the legends to be horizontal
+
+
+gsea_top_pc2 <- gsea_top_pc2 %>%
+  dplyr::mutate(
+    Description_clean = gsub(" - Mus musculus \\(house mouse\\)", "", Description),
+    Description_clean = str_wrap(Description_clean, width = 20)
+  )
+
+ggplot(gsea_top_pc2, aes(x = NES, y = reorder(Description_clean, NES))) +
+  geom_point(aes(size = setSize, color = p.adjust)) +
+  scale_color_gradient(low = "#B4C7D6", high = "#A94642") +
+  scale_x_continuous(limits = c(-2, 2)) +
+  scale_y_discrete(expand = expansion(mult = c(0.05, 0.1))) +
+  theme_minimal(base_size = 8) +
+  theme(
+    axis.title = element_text(color = "black"),
+    axis.text = element_text(color = "black"),
+    legend.title = element_text(color = "black"),
+    legend.text = element_text(color = "black")
+  ) +
+  labs(
+    title = "PC2 GSEA Pathway Enrichment",
+    x = "Normalized Enrichment Score (NES)",
+    y = NULL,
+    color = "adjusted p-value",
+    size = "Gene Set Size"
+  ) +
+  theme(
+    legend.title = element_text(size = 6),
+    legend.text = element_text(size = 5),
+    legend.key.size = unit(0.2, "cm"),
+    legend.position = "right"
+  ) # +
+# guides(
+#   size = guide_legend(override.aes = list(size = 2)),
+#   color = guide_colorbar(barwidth = 4, barheight = 0.3)
+# ) # for if you want the legends to be horizontal
+```
+
+```{r DE analysis}
+dds <- DESeqDataSetFromMatrix(
+  countData = iWAT_raw_counts,
+  colData = iWAT_meta,
+  design = ~group
+)
+
+###################### DESeq
+## Outputs a results table with all DE genes
+
+# Perform the DE analysis
+dds <- DESeq(dds)
+
+resultsNames(dds)
+# Make sure that the control is at the beginning of the levels
+dds$group
+# dds$condition <- relevel(dds$condition, ref = "untreated")
+
+# Extract results table
+contrast <- c("group", "miR-335-TuD_6w", "ctrl-TuD_6w")
+res_table <- results(dds, contrast = contrast, alpha = 0.05) # FDR > 0.05
+
+# Filter genes by zero expression
+res_table |>
+  data.frame() |>
+  dplyr::filter(baseMean == 0)
+
+# Filter genes that have an extreme outlier
+res_table |>
+  as.data.frame() |>
+  dplyr::filter(
+    is.na(pvalue),
+    is.na(padj),
+    baseMean > 0
+  )
+
+# Filter genes below the low mean threshold
+res_table |>
+  data.frame() |>
+  dplyr::filter(
+    !is.na(pvalue),
+    # is.na(padj),
+    baseMean > 0
+  )
+
+# LFC shrinking
+# Save the unshrunken results to compare
+res_table_unshrunken <- res_table
+
+# Apply fold change shrinkage
+res_table <- lfcShrink(dds, coef = "group_miR.335.TuD_6w_vs_ctrl.TuD_6w", type = "apeglm")
+# In the unshrunken fold change values plotted, you can see the abundance of scatter for the the lowly expressed genes.
+# That is, many of the low expressors exhibit very high fold changes.
+# After shrinkage, we see the fold changes are much smaller estimates.
+
+# Check how many DEGs were retreived
+summary(res_table, alpha = 0.05) # padj/FDR < 0.05
+
+# Compare with unshrunken
+summary(res_table_unshrunken, alpha = 0.05)
+
+# MA plot
+plotMA(res_table, ylim = c(-2, 2))
+plotMA(res_table_unshrunken, ylim = c(-2, 2))
+
+padj.cutoff <- 0.05
+
+# Create a tibble of results and add back gene ids
+res_table_tb <- res_table |>
+  data.frame() |>
+  rownames_to_column(var = "gene_id") |>
+  as_tibble()
+
+# Add gene_name from  original counts matrix
+res_table_tb <- res_table_tb |>
+  left_join(
+    raw_counts_matrix |>
+      rownames_to_column(var = "gene_id") |>
+      dplyr::select(gene_id, gene_name),
+    by = "gene_id"
+  )
+
+# Subset the tibble to keep only significant genes (padj<0.05)
+sig_kd <- res_table_tb |>
+  dplyr::filter(padj < padj.cutoff)
+
+# Take a quick look at this tibble
+sig_kd
+
+# Make a csv file
+# write_csv(sig_kd, "results/sig_kd.csv")
+```
+
+```{r DE visualization}
+# Add the gene symbols column to the normalized_counts tibble
+normalized_counts <- counts(dds, normalized = T) |> # First convert normalized_counts to a data frame
+  data.frame(check.names = F) |> # Prevents column names from changing
+  rownames_to_column(var = "gene_id") |> # Transfer the row names to a new column called "gene_id"
+  as_tibble() |>
+  left_join(
+    raw_counts_matrix |>
+      rownames_to_column(var = "gene_id") |>
+      dplyr::select(gene_id, gene_name),
+    by = "gene_id"
+  )
+
+
+# Save as file
+# write_csv(normalized_counts, "results/normalized_counts.csv")
+
+## Volcano plot
+# Obtain logical vector where TRUE values denote padj values < 0.05 and fold change > 1.5 in either direction
+# 2^0.585 ≈ 1.5
+res_table_tb <- res_table_tb |>
+  dplyr::mutate(threshold_de = padj < 0.05 & abs(log2FoldChange) >= 0.585)
+
+## Create an empty column to indicate which genes to label
+res_table_tb <- res_table_tb |> dplyr::mutate(genelabels = "")
+
+## Sort by padj values
+res_table_tb <- res_table_tb |> dplyr::arrange(padj)
+
+## Populate the genelabels column with contents of the gene symbols column for the first 10 rows, i.e. the top 30 most significantly expressed genes
+res_table_tb$genelabels[1:30] <- as.character(res_table_tb$gene_name[1:30])
+
+## OR Populate genelabels with all genes that pass threshold
+res_table_tb <- res_table_tb |>
+  mutate(threshold_de = threshold_de)
+
+res_table_tb <- res_table_tb |>
+  mutate(genelabels = ifelse(threshold_de, as.character(gene_name), NA))
+
+ggplot(res_table_tb, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(aes(colour = threshold_de),
+    alpha = 0.7,
+    size = 0.5
+  ) +
+  geom_label_repel(aes(label = genelabels), size = 2, max.overlaps = 20) +
+  scale_color_manual(values = c("#B4C7D6", "#A94642")) +
+  # scale_x_continuous(limits = c(-10, 10), expand = expansion(mult = 0.02)) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dotted", colour = "grey40") +
+  geom_vline(xintercept = c(-0.585, 0.585), linetype = "dotted", colour = "grey40") +
+  ggtitle("miR-335 KD in 2w DIO iWAT") +
+  xlab("log2 fold change") +
+  ylab("-log10 adjusted p-value") +
+  coord_cartesian(
+    xlim = c(-3, 10),
+    ylim = c(0, 10)
+  ) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = rel(1.5), hjust = 0.5, face = "bold"),
+    axis.title = element_text(size = rel(1)),
+    axis.text = element_text(size = rel(0.8)),
+    base_size = 8
+  )
+
+
+############### Heatmap ###############
+# Filter significant genes
+sig_gene_names <- sig_kd |>
+  dplyr::select("gene_id") |>
+  pull()
+
+# Extract the expression matrix of rlog-transformed values stored in the DEseq2 transformed object and add gene annotations.
+# These values are in log2-scale, already normalize, and are variance-stabilized.
+# heatmap_data <- assay(rld)[sig_gene_names, ]
+heatmap_data <- assay(rld) |>
+  as.data.frame() |>
+  tibble::rownames_to_column("gene") |>
+  dplyr::filter(gene %in% sig_gene_names) |>
+  tibble::column_to_rownames("gene")
+
+breaks <- seq(-2, 2, length.out = 101)
+
+# Build heatmap matrix (keep gene_id as rownames)
+heatmap_data <- assay(rld) |>
+  as.data.frame() |>
+  tibble::rownames_to_column("gene_id") |>
+  dplyr::filter(gene_id %in% sig_gene_names) |>
+  tibble::column_to_rownames("gene_id")
+
+# Create row labels from annotation table
+labels_row <- annotations_ahb$gene_name[
+  match(rownames(heatmap_data), annotations_ahb$gene_id)
+]
+
+# Fallback to gene_id if gene_name is missing
+labels_row[is.na(labels_row)] <- rownames(heatmap_data)[is.na(labels_row)]
+
+
+pheatmap(
+  heatmap_data,
+  labels_row = labels_row,
+  annotation_col = iWAT_meta[, "group", drop = FALSE],
+  annotation_colors = list(
+    group = c(
+      "ctrl-TuD_6w" = "#54494B",
+      "miR-335-TuD_6w" = "#E5C689"
+    )
+  ),
+  color = colorRampPalette(c("#B4C7D6", "white", "#A94642"))(100),
+  # breaks = seq(-2, 2, length.out = 101),
+  scale = "row",
+  clustering_distance_rows = "correlation",
+  clustering_distance_cols = "correlation",
+  show_rownames = TRUE,
+  border_color = NA,
+  show_colnames = FALSE,
+  main = "DESeq2 Significant Genes (row-scaled)",
+  name = "Scaled expression (z-score)",
+  legend_breaks = seq(-2, 2, by = 1),
+  legend_labels = c("-2", "-1", "0", "1", "2"),
+  fontsize = 8
+)
+
+##### With ComplexHeatmap
+# -----------------------------
+# 1. Filter significant genes
+# -----------------------------
+sig_gene_names <- sig_kd |>
+  dplyr::select(gene_id) |>
+  dplyr::pull()
+
+# -----------------------------
+# 2. Build heatmap matrix
+# -----------------------------
+heatmap_data <- assay(rld) |>
+  as.data.frame() |>
+  tibble::rownames_to_column("gene_id") |>
+  dplyr::filter(gene_id %in% sig_gene_names) |>
+  tibble::column_to_rownames("gene_id")
+
+# -----------------------------
+# 3. Row scaling (z-score)
+# -----------------------------
+heatmap_scaled <- t(scale(t(as.matrix(heatmap_data))))
+
+# -----------------------------
+# 4. Gene name labels (optional)
+# -----------------------------
+labels_row <- annotations_ahb$gene_name[
+  match(rownames(heatmap_scaled), annotations_ahb$gene_id)
+]
+
+labels_row[is.na(labels_row)] <- rownames(heatmap_scaled)
+
+# -----------------------------
+# 5. Column annotation
+# -----------------------------
+group_colors <- c(
+  "ctrl-TuD_6w" = "#54494B",
+  "miR-335-TuD_6w" = "#E5C689"
+)
+
+top_anno <- HeatmapAnnotation(
+  group = iWAT_meta$group,
+  col = list(group = group_colors),
+  show_annotation_name = FALSE
+)
+
+# -----------------------------
+# 6. Color function (z-score)
+# -----------------------------
+col_fun <- circlize::colorRamp2(
+  c(-2, 0, 2),
+  c("#B4C7D6", "white", "#A94642")
+)
+
+# -----------------------------
+# 7. Build heatmap
+# -----------------------------
+ht <- Heatmap(
+  heatmap_scaled,
+  name = "z-score",
+  col = col_fun,
+  top_annotation = top_anno,
+  show_row_names = TRUE,
+  row_labels = labels_row,
+  show_column_names = FALSE,
+  clustering_distance_rows = "pearson",
+  clustering_distance_columns = "euclidean",
+
+  # Create gene modules
+  # row_split = 9, # try 3–6 depending on complexity
+
+  column_title = "DESeq2 Significant Genes (row-scaled)",
+  border = FALSE,
+  column_split = iWAT_meta$group
+)
+
+# -----------------------------
+# 8. Extract which genes are in which modules
+# -----------------------------
+ht_drawn <- draw(ht)
+
+row_clusters <- row_order(ht_drawn)
+
+module_list <- lapply(seq_along(row_clusters), function(i) {
+  data.frame(
+    gene_id = rownames(heatmap_scaled)[row_clusters[[i]]],
+    module = paste0("Module_", i)
+  )
+}) |> dplyr::bind_rows()
+
+# -----------------------------
+# 9. Annotate the modules
+# -----------------------------
+
+module7_genes <- module_list |>
+  dplyr::filter(module == "Module_7") |>
+  dplyr::pull(gene_id)
+
+ego7 <- enrichGO(
+  gene = module7_genes,
+  OrgDb = org.Mm.eg.db,
+  keyType = "ENSEMBL",
+  ont = "BP"
+)
+
+module7_summary <- data.frame(ego7)
+
+module7_genes_tb <- tibble::tibble(gene_id = module7_genes) |>
+  dplyr::left_join(annotations_ahb, by = "gene_id")
+
+# Expand geneID column (ENSEMBL IDs separated by "/")
+
+ego7_long <- module7_summary %>%
+  dplyr::select(ID, Description, geneID) %>%
+  tidyr::separate_rows(geneID, sep = "/") %>%
+  dplyr::rename(gene_id = geneID)
+
+ego7_annotated <- ego7_long %>%
+  dplyr::left_join(annotations_ahb, by = "gene_id")
+
+module4_genes <- module_list |>
+  dplyr::filter(module == "Module_4") |>
+  dplyr::pull(gene_id)
+
+ego <- enrichGO(
+  gene = module4_genes,
+  OrgDb = org.Mm.eg.db,
+  keyType = "ENSEMBL",
+  ont = "BP"
+)
+
+module4_summary <- data.frame(ego)
+module4_genes_tb <- tibble::tibble(gene_id = module4_genes) |>
+  dplyr::left_join(annotations_ahb, by = "gene_id")
+
+
+module6_genes <- module_list |>
+  dplyr::filter(module == "Module_6") |>
+  dplyr::pull(gene_id)
+
+ego6 <- enrichGO(
+  gene = module6_genes,
+  OrgDb = org.Mm.eg.db,
+  keyType = "ENSEMBL",
+  ont = "BP"
+)
+
+module6_summary <- data.frame(ego6)
+
+module6_genes_tb <- tibble::tibble(gene_id = module6_genes) |>
+  dplyr::left_join(annotations_ahb, by = "gene_id")
+
+module1_genes <- module_list |>
+  dplyr::filter(module == "Module_1") |>
+  dplyr::pull(gene_id)
+
+ego1 <- enrichGO(
+  gene = module1_genes,
+  OrgDb = org.Mm.eg.db,
+  keyType = "ENSEMBL",
+  ont = "BP"
+)
+
+module1_summary <- data.frame(ego1)
+module1_genes_tb <- tibble::tibble(gene_id = module1_genes) |>
+  dplyr::left_join(annotations_ahb, by = "gene_id")
+
+
+### Add module labels to heatmap
+
+module_names <- c(
+  "Stromal/vascular identity",
+  "Stress & remodeling",
+  "Inflammation"
+)
+
+ht <- Heatmap(
+  heatmap_scaled,
+  name = "z-score",
+  col = col_fun,
+  top_annotation = top_anno,
+  show_row_names = TRUE,
+  row_labels = labels_row,
+  show_column_names = FALSE,
+  clustering_distance_rows = "pearson",
+  clustering_distance_columns = "pearson",
+  row_split = 3,
+  row_title = module_names, # Add module labels
+  row_title_gp = grid::gpar(fontsize = 5, fontface = "bold"),
+  row_names_gp = grid::gpar(fontsize = 5),
+  column_title = "DESeq2 Significant Genes (row-scaled)",
+  column_title_gp = grid::gpar(fontface = "bold"),
+  row_title_side = "right",
+  border = FALSE,
+  column_split = iWAT_meta$group,
+)
+
+ht_drawn <- draw(ht)
+
+
+############### Clustering ###############
+## Identifying clusters of genes with shared expression profiles
+# Extract results for LRT
+dds_lrt <- DESeq(dds, test = "LRT", reduced = ~1)
+
+res_LRT <- results(dds_lrt)
+resultsNames(dds_lrt)
+dds_lrt$group
+res_LRT
+
+# Identifying significant genes
+# Create a tibble for LRT results
+res_LRT_tb <- res_LRT %>%
+  data.frame() %>%
+  rownames_to_column(var = "gene_id") %>%
+  as_tibble()
+
+# Subset to return genes with padj < 0.05
+sigLRT_genes <- res_LRT_tb %>%
+  dplyr::filter(padj < padj.cutoff)
+
+# Get number of significant genes
+nrow(sigLRT_genes)
+
+# Compare to numbers we had from Wald test
+nrow(sig_kd)
+
+# Inner join to find overlapping genes
+overlapping_genes <- inner_join(sig_kd, sigLRT_genes, by = "gene_id")
+
+# Count the number of overlapping genes
+nrow(overlapping_genes)
+
+
+
+### Transform counts for data visualization
+rld <- rlog(dds, blind = TRUE)
+rld_mat <- assay(rld)
+
+# Subset results for faster cluster finding (for classroom demo purposes)
+clustering_sig_genes <- sigLRT_genes |>
+  arrange(padj) |>
+  head(n = 1000)
+
+
+# Obtain rlog values for those significant genes
+cluster_rlog <- rld_mat[clustering_sig_genes$gene_id, ]
+
+# Use the `degPatterns` function from the 'DEGreport' package to show gene clusters across conditions
+library(DEGreport)
+clusters <- degPatterns(cluster_rlog,
+  metadata = iWAT_meta_clean,
+  time = "group",
+  col = NULL
+)
+
+
+# Extract the Group 1 genes --> genes that increase in expression from miR-335 KD, compared to control
+group1 <- clusters$df |>
+  dplyr::filter(cluster == 1) |>
+  dplyr::mutate(
+    gene_name = genes_annot$gene_name[
+      match(genes, genes_annot$gene_id)
+    ]
+  )
+
+# Extract the Group 2 genes --> genes that decrease in expression from miR-335 KD, compared to control
+group2 <- clusters$df |>
+  dplyr::filter(cluster == 2) |>
+  dplyr::mutate(
+    gene_name = genes_annot$gene_name[
+      match(genes, genes_annot$gene_id)
+    ]
+  )
+
+
+# Create a matrix for Group 1 genes
+group1_mat <- cluster_rlog[group1$genes, ]
+rownames(group1_mat) <- group1$gene_name # Replace gene IDs with gene names
+
+# Optional: scale by row (genes) for better visualization
+group1_scaled <- t(scale(t(group1_mat)))
+
+# Plot heatmap for Group 1
+pheatmap(
+  group1_scaled,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
+  main = "Cluster 1: Downregulated Genes"
+)
+
+# Repeat for Group 2 genes
+group2_mat <- cluster_rlog[group2$genes, ]
+rownames(group2_mat) <- group2$gene_name
+group2_scaled <- t(scale(t(group2_mat)))
+
+
+pheatmap(
+  group2_scaled,
+  annotation_col = iWAT_meta_clean[, "group", drop = FALSE],
+  annotation_colors = list(
+    group = c(
+      "ctrl-TuD_6w" = "#54494B",
+      "miR-335-TuD_6w" = "#E5C689"
+    )
+  ),
+  annotation_legend = FALSE,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE,
+  show_colnames = FALSE,
+  # color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
+  color = colorRampPalette(c("#B4C7D6", "white", "#A94642"))(100),
+  breaks = seq(-2, 2, length.out = 101),
+  border_color = NA,
+  main = "Cluster 2: Upregulated Genes"
+)
+
+####### Using top variable genes per cluster
+### 1. rlog transform
+rld <- rlog(dds, blind = TRUE)
+rld_mat <- assay(rld)
+
+### 2. keep all genes for clustering (NO DE filtering)
+gene_var <- apply(rld_mat, 1, var)
+
+top_genes <- names(sort(gene_var, decreasing = TRUE))[1:2000]
+top_genes <- names(sort(apply(rld_mat, 1, var), decreasing = TRUE))[1:2000]
+
+cluster_mat <- rld_mat[top_genes, ]
+
+### 3. clustering
+clusters <- degPatterns(
+  cluster_mat,
+  metadata = iWAT_meta_clean,
+  time = "group",
+  col = NULL
+)
+
+### 4. select cluster 1 genes
+cluster1 <- clusters$df |>
+  dplyr::filter(cluster == 1)
+
+### 5. extract expression matrix for cluster 2
+group1_mat <- rld_mat[cluster1$genes, ]
+
+### 6. select TOP VARIABLE GENES within cluster (IMPORTANT STEP)
+gene_var1 <- apply(group1_mat, 1, var)
+
+top_cluster1_genes <- names(sort(gene_var1, decreasing = TRUE))[1:60]
+
+group1_small <- group1_mat[top_cluster1_genes, ]
+
+### 7. scale rows (z-score per gene)
+group1_scaled <- t(scale(t(group1_small)))
+
+
+### 8. Annotate with gene names
+labels_row <- annotations_ahb$gene_name[
+  match(rownames(group1_scaled), annotations_ahb$gene_id)
+]
+
+labels_row[is.na(labels_row)] <- rownames(group1_scaled)
+
+### 8. heatmap
+pheatmap(
+  group1_scaled,
+  annotation_col = iWAT_meta_clean[, "group", drop = FALSE],
+  annotation_colors = list(
+    group = c(
+      "ctrl-TuD_6w" = "#54494B",
+      "miR-335-TuD_6w" = "#E5C689"
+    )
+  ),
+  row_labels = labels_row,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE,
+  show_colnames = FALSE,
+  color = colorRampPalette(c("#B4C7D6", "white", "#A94642"))(100),
+  breaks = seq(-2, 2, length.out = 101),
+  border_color = NA,
+  main = "Cluster 1 (Top 60 variable genes)"
+)
+```
+
+```{r ORA - GO analysis}
+## Untested genes have padj = NA, so let's keep genes with padj != NA
+res_table_tb_noNAs <- dplyr::filter(res_table_tb, padj != "NA")
+
+res_ids <- res_table_tb_noNAs |>
+  dplyr::select(-"gene_name")
+
+## Create background dataset for hypergeometric testing using all tested genes for significance in the results
+all_genes <- as.character(genes_annot$gene_id)
+
+## Extract significant results
+sig_kd <- dplyr::filter(res_ids, padj < 0.05)
+
+sig_kd_genes <- as.character(sig_kd$gene_id)
+
+
+## Run GO enrichment analysis
+ego_bp <- enrichGO(
+  gene = sig_kd_genes,
+  universe = all_genes,
+  keyType = "ENSEMBL",
+  OrgDb = org.Mm.eg.db,
+  ont = "BP",
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+## Output results from GO analysis to a table
+cluster_summary_bp <- data.frame(ego_bp)
+
+# write.csv(cluster_summary, "results/clusterProfiler.csv")
+
+
+dotplot(ego_bp, showCategory = 30)
+
+## Run GO enrichment analysis
+ego_mf <- enrichGO(
+  gene = sig_kd_genes,
+  universe = all_genes,
+  keyType = "ENSEMBL",
+  OrgDb = org.Mm.eg.db,
+  ont = "MF",
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+## Output results from GO analysis to a table
+cluster_summary_mf <- data.frame(ego_mf)
+
+dotplot(ego_mf, showCategory = 20)
+
+# Map to Entrez IDs
+sig_kd_genes_entrez <- bitr(sig_kd$gene_id,
+  fromType = "ENSEMBL",
+  toType = "ENTREZID",
+  OrgDb = org.Mm.eg.db
+)
+
+kegg_enrich <- enrichKEGG(
+  gene = sig_kd_genes_entrez$ENTREZID,
+  organism = "mmu", # mouse
+  pvalueCutoff = 0.05
+)
+
+# View top pathways
+head(kegg_enrich)
+
+# Plot barplot or dotplot
+library(enrichplot)
+barplot(kegg_enrich, showCategory = 20)
+dotplot(kegg_enrich, showCategory = 20)
+
+
+
+##### Run GO analyses on up/downregulated genes separately
+## Extract upregulated genes
+sig_up <- dplyr::filter(res_ids, padj < 0.05 & log2FoldChange > 0)
+
+sig_up_genes <- as.character(sig_up$gene_id)
+
+## Run GO enrichment analysis
+ego_up <- enrichGO(
+  gene = sig_up_genes,
+  universe = all_genes,
+  keyType = "ENSEMBL",
+  OrgDb = org.Mm.eg.db,
+  ont = "BP",
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+simplify(ego_up)
+
+ego_up_bp <- data.frame(ego_up)
+
+dotplot(ego_up, showCategory = 20)
+
+## Extract downregulated genes
+sig_down <- dplyr::filter(res_ids, padj < 0.05 & log2FoldChange < 0)
+
+sig_down_genes <- as.character(sig_down$gene_id)
+```
+
+```{r fGSEA}
+# res is your DESeq2 results
+res_df <- res_table |>
+  as.data.frame() |>
+  rownames_to_column("gene_id") |>
+  left_join(
+    raw_counts_matrix |>
+      rownames_to_column("gene_id") |>
+      dplyr::select(gene_id, gene_name),
+    by = "gene_id"
+  )
+
+# Remove NAs
+res_df <- res_df |>
+  dplyr::filter(
+    !is.na(pvalue),
+    !is.na(log2FoldChange),
+    !is.na(gene_name),
+    gene_name != ""
+  )
+
+# Create custom ranking for GSEA; a significance-weighted expression change score
+library(msigdbr)
+library(curl)
+library(fgsea)
+msig <- msigdbr(species = "Mus musculus", collection = "H")
+
+ranks <- sign(res_df$log2FoldChange) * -log10(res_df$pvalue)
+names(ranks) <- res_df$gene_name
+sum(names(ranks) %in% unique(msig$gene_symbol))
+
+
+
+pathways <- split(msig$gene_symbol, msig$gs_name)
+
+fgseaRes <- fgsea(
+  pathways = pathways,
+  stats = ranks,
+  minSize = 15,
+  maxSize = 500
+)
+
+fgseaRes <- fgseaRes[order(fgseaRes$padj), ]
+
+head(fgseaRes[, c("pathway", "NES", "padj")])
+tail(fgseaRes[, c("pathway", "NES", "padj")])
+
+
+### Or use raw unshrunken LFC directly
+ranks <- res_df$log2FoldChange
+names(ranks) <- res_df$gene_name
+
+ranks <- ranks[!is.na(ranks)]
+ranks <- sort(ranks, decreasing = TRUE)
+
+fgseaRes <- fgsea(
+  pathways = pathways,
+  stats = ranks,
+  minSize = 15,
+  maxSize = 500
+)
+
+
+##### Get leading edge genes for a specific pathway
+fgseaRes$leadingEdge[fgseaRes$pathway == "HALLMARK_FATTY_ACID_METABOLISM"][[1]]
+fgseaRes$leadingEdge[fgseaRes$pathway == "HALLMARK_PI3K_AKT_MTOR_SIGNALING"][[1]]
+fgseaRes$leadingEdge[fgseaRes$pathway == "HALLMARK_ADIPOGENESIS"][[1]]
+fgseaRes$leadingEdge[fgseaRes$pathway == "HALLMARK_OXIDATIVE_PHOSPHORYLATION"][[1]]
+fgseaRes$leadingEdge[fgseaRes$pathway == "HALLMARK_GLYCOLYSIS"][[1]]
+
+##### Plot
+plotEnrichment(pathways[["HALLMARK_OXIDATIVE_PHOSPHORYLATION"]], ranks)
+
+topPathways <- fgseaRes[order(padj)][1:5, pathway]
+
+lapply(topPathways, function(pw) {
+  plotEnrichment(pathways[[pw]], ranks) + ggtitle(pw)
+})
+
+## Custom dotplot
+fgseaRes_clean <- fgseaRes %>%
+  dplyr::mutate(
+    pathway = str_remove(pathway, "^HALLMARK_"),
+    pathway = str_replace_all(pathway, "_", " ")
+  )
+
+fgseaRes_clean$pathway <- stringr::str_to_title(fgseaRes_clean$pathway)
+
+fgseaRes_clean |>
+  arrange(padj) |>
+  slice(1:30) |>
+  ggplot(aes(x = NES, y = reorder(pathway, NES))) +
+  geom_point(aes(size = size, color = padj)) +
+  ggtitle("FGSEA") +
+  labs(y = NULL) +
+  labs(x = "Normalized Enrichment Score (NES)") +
+  scale_color_gradient(
+    low = "#A94642", # most significant
+    high = "grey40" # least significant
+  ) +
+  scale_y_discrete(labels = function(x) stringr::str_wrap(x, width = 25)) + # wrap texts long pathway names
+  theme(
+    plot.title = element_text(size = 11, face = "bold"),
+    axis.text.y = element_text(size = 9, color = "black"),
+    axis.text.x = element_text(size = 9)
+  )
+
+## Volcano-like plot
+ggplot(fgseaRes, aes(NES, -log10(padj))) +
+  geom_point(alpha = 0.7) +
+  theme_minimal()
+
+
+
+##### Get DE genes contributing to a specific pathway
+path_genes <- pathways[["HALLMARK_ADIPOGENESIS"]]
+
+intersect(names(ranks), path_genes)
+
+up_genes <- intersect(names(ranks[ranks > 0]), path_genes)
+down_genes <- intersect(names(ranks[ranks < 0]), path_genes)
+
+up_genes
+down_genes
+```
+
+```{r GSEA}
+# Map the ensembl ids to entrez ids from the results table
+
+res_ids_entrez <- bitr(res_ids$gene_id,
+  fromType = "ENSEMBL",
+  toType = "ENTREZID",
+  OrgDb = org.Mm.eg.db
+)
+
+res_ids <- res_ids |>
+  left_join(res_ids_entrez, by = c("gene_id" = "ENSEMBL"))
+
+
+## Remove any NA values (reduces the data by quite a bit)
+res_entrez <- dplyr::filter(res_ids, ENTREZID != "NA")
+
+## Remove any Entrez duplicates
+res_entrez <- res_entrez[which(duplicated(res_entrez$ENTREZID) == F), ]
+
+## Extract the foldchanges
+foldchanges <- res_entrez$log2FoldChange
+
+## Name each fold change with the corresponding Entrez ID
+names(foldchanges) <- res_entrez$ENTREZID
+
+## Sort fold changes in decreasing order
+foldchanges <- sort(foldchanges, decreasing = TRUE)
+
+head(foldchanges)
+
+set.seed(123456)
+
+## GSEA using gene sets from KEGG pathways
+gseaKEGG <- gseKEGG(
+  geneList = foldchanges, # ordered named vector of fold changes (Entrez IDs are the associated names)
+  organism = "mmu", # supported organisms listed below
+  minGSSize = 20, # minimum gene set size (# genes in set) - change to test more sets or recover sets with fewer # genes
+  pvalueCutoff = 0.05, # padj cutoff value
+  verbose = FALSE
+)
+
+## Extract the GSEA results
+gseaKEGG_results <- gseaKEGG@result
+head(gseaKEGG_results)
+```
